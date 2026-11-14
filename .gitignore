@@ -1,0 +1,17 @@
+# Private working notes (owner machine only); plan snapshots are tracked
+.private/*
+!.private/plans/
+
+# Isolated per-tool config (terraform data dir, mask words)
+.scratch*
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+
+# Python
+__pycache__/
+.venv/

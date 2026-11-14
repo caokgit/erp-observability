@@ -1,0 +1,17 @@
+# erp-observability's own settings for the shared tools (method/README.md). Never synced.
+
+[commit]
+# Paths whose changes need a "Spec: docs/<file>.md#<anchor>" trailer (method/METHOD.md "Rule 0")
+implementation_paths = ["terraform/", "kql/", "job/", "sql/", "apps/", "tools/", "policy/", ".github/", "k8s/"]
+
+[docs]
+self_indexed = ["learn", "runbooks", "journal"]
+
+[check]
+# No subscription, tenant or workspace ids, and no addresses, in any doc (AGENTS.md "Writing")
+ipv4 = "forbid"
+guid = "forbid"
+
+[mask]
+words_file = ".scratch_mask/mask-words"
+label = "<name>"

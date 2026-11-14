@@ -1,0 +1,9 @@
+// O1 Odoo workers at their limits (docs/specs/round-2.md#signals): from the log reader's counts, a bin with at least
+// MinKills worker ends Odoo states itself (the Kinds: limits, timeouts, critical errors; inferred kills are not alerted).
+// Parameters: TargetEnv, Start, End, Kinds, MinKills, BinSize.
+OdooLog_CL
+| where TimeGenerated between (Start .. End) and Env == TargetEnv and Kind in (Kinds)
+| summarize n = sum(Count) by Kind, Bin = bin_at(TimeGenerated, BinSize, Start)
+| summarize Kills = sum(n), ByKind = make_bag(bag_pack(Kind, n)) by Bin
+| where Kills >= MinKills
+| project Bin, Kills, ByKind

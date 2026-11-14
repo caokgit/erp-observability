@@ -1,0 +1,8 @@
+// T1 table bloat (docs/specs/round-2.md#signals): on the SQL job's last run in each bin, a table with at least MinDeadPct
+// percent and MinDeadRows dead rows, not autovacuumed for NoVacuum (or never). One row per table and bin.
+// Parameters: TargetEnv, Start, End, MinDeadPct, MinDeadRows, NoVacuum, BinSize.
+OdooTables_CL
+| where TimeGenerated between (Start .. End) and Env == TargetEnv
+| summarize arg_max(TimeGenerated, *) by TableName, Bin = bin_at(TimeGenerated, BinSize, Start)
+| where DeadPct >= MinDeadPct and DeadRows >= MinDeadRows and (isnull(LastAutovacuum) or LastAutovacuum < TimeGenerated - NoVacuum)
+| project Bin, TableName, DeadPct, DeadRows, LastAutovacuum

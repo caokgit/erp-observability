@@ -1,0 +1,35 @@
+# On top of the lab's common and kind values (docs/specs/kubernetes-mapping.md#the-cluster).
+fullnameOverride: kps
+prometheus:
+  prometheusSpec:
+    enableRemoteWriteReceiver: true   # Loki's ruler writes the SLO's recorded series here
+alertmanager:
+  config:
+    route:
+      receiver: "null"   # only the lab's own rules (severity page or ticket) reach the sink
+      group_by: [alertname, severity]
+      group_wait: 10s
+      group_interval: 1m
+      repeat_interval: 4h
+      routes:
+        - {receiver: "null", matchers: ['alertname = "Watchdog"']}
+        - {receiver: page, matchers: ['severity = "page"']}
+        - {receiver: ticket, matchers: ['severity = "ticket"']}
+    receivers:
+      - name: "null"
+      # Every notification is logged with its arrival time by the sink (k8s/manifests/alert-sink.yaml): page and
+      # ticket stay two receivers, as the two action groups per environment on Azure (D11).
+      - name: page
+        webhook_configs: [{url: "http://alert-sink.monitoring.svc:8080/", send_resolved: true}]
+      - name: ticket
+        webhook_configs: [{url: "http://alert-sink.monitoring.svc:8080/", send_resolved: true}]
+grafana:
+  service:
+    type: ClusterIP
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+  # the lab's Loki data source again, with a fixed uid the dashboard names (k8s/dashboards/erp.json)
+  additionalDataSources:
+    - {name: Loki, type: loki, uid: loki, url: "http://loki.monitoring.svc:3100"}

@@ -1,0 +1,50 @@
+# The track's log rules in LogQL (docs/specs/kubernetes-mapping.md#the-rules), run by Loki's ruler: L2 and O1 as alerts
+# sent to Alertmanager, and the SLO's request counts per journey recorded and written to Prometheus.
+# Odoo's access line: ... werkzeug: <addr> - - [<time>] "GET /path HTTP/1.1" 500 - ...; health checks are not requests.
+groups:
+  - name: erp-L2-http
+    interval: 30s
+    rules:
+      - alert: L2Http5xxBurst
+        expr: >-
+          sum(count_over_time({namespace="erp", container="odoo"} |= "werkzeug" != "/web/health"
+            | regexp `"(?P<method>[A-Z]+) (?P<path>\S+) HTTP/[0-9.]+" (?P<status>\d{3})` | status >= 500 [5m])) >= 25
+        labels: {severity: page, rule: L2}
+        annotations:
+          summary: "25 or more 5xx answers in 5 min"
+  - name: erp-O1-worker-limits
+    interval: 30s
+    rules:
+      - alert: O1WorkerLimits
+        # Odoo 19's own limit lines (odoo/service/server.py): prefork workers (as the client's) log a memory or CPU limit,
+        # "<worker> (<pid>) timeout after <n>s" or a critical error; the threaded server (the lab's) logs its real-time
+        # and memory limits per thread, and repeats the line at each check while the request lasts
+        expr: >-
+          sum(count_over_time({namespace="erp", container="odoo"}
+            |~ `Worker \(\d+\) (virtual memory|CPU time) limit \(.*\) reached|\w+ \(\d+\) timeout after \d+s|Critial worker error|virtual real time limit \(.*\) reached|Server memory limit \(.*\) reached` [15m])) >= 3
+        labels: {severity: page, rule: O1}
+        annotations:
+          summary: "3 or more of Odoo's limit lines in 15 min: requests in flight on those workers fail"
+  - name: erp-SLO-counts
+    interval: 30s
+    rules:
+      - record: erp:requests:count5m
+        expr: >-
+          sum by (journey) (count_over_time({namespace="erp", container="odoo"} |= "werkzeug" != "/web/health"
+            | regexp `"(?P<method>[A-Z]+) (?P<path>\S+) HTTP/[0-9.]+" (?P<status>\d{3})`
+            | label_format journey=`{{ if hasPrefix "/erp/tv" .path }}tv{{ else }}interactive{{ end }}` [5m]))
+      - record: erp:requests_bad:count5m
+        expr: >-
+          sum by (journey) (count_over_time({namespace="erp", container="odoo"} |= "werkzeug" != "/web/health"
+            | regexp `"(?P<method>[A-Z]+) (?P<path>\S+) HTTP/[0-9.]+" (?P<status>\d{3})` | status >= 500
+            | label_format journey=`{{ if hasPrefix "/erp/tv" .path }}tv{{ else }}interactive{{ end }}` [5m]))
+      - record: erp:requests:count1h
+        expr: >-
+          sum by (journey) (count_over_time({namespace="erp", container="odoo"} |= "werkzeug" != "/web/health"
+            | regexp `"(?P<method>[A-Z]+) (?P<path>\S+) HTTP/[0-9.]+" (?P<status>\d{3})`
+            | label_format journey=`{{ if hasPrefix "/erp/tv" .path }}tv{{ else }}interactive{{ end }}` [1h]))
+      - record: erp:requests_bad:count1h
+        expr: >-
+          sum by (journey) (count_over_time({namespace="erp", container="odoo"} |= "werkzeug" != "/web/health"
+            | regexp `"(?P<method>[A-Z]+) (?P<path>\S+) HTTP/[0-9.]+" (?P<status>\d{3})` | status >= 500
+            | label_format journey=`{{ if hasPrefix "/erp/tv" .path }}tv{{ else }}interactive{{ end }}` [1h]))

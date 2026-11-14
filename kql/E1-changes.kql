@@ -1,0 +1,22 @@
+// E1 the Odoo apps' deploys and entrypoint warnings (docs/specs/round-4.md#2-and-3-e1-the-apps-deploys-and-entrypoint-warnings):
+// per bin, the apps and their revisions created (a deploy) and the entrypoint's WARNING lines (a configuration check the
+// container's start failed, as the 2026-08-20 to 09-23 memory-limit warning).
+// Parameters: Apps, Start, End, BinSize.
+// A RevisionCreation record names the outgoing revision; the new one is the revision whose image "main" was pulled in
+// the same bin (docs/specs/round-6.md#2-e1-names-the-new-revision), else the card says which one it replaced.
+let Deploys = ContainerAppSystemLogs_CL
+| where TimeGenerated between (Start .. End) and ContainerAppName_s in~ (Apps)
+| where Reason_s == "RevisionCreation" or (Reason_s == "PulledImage" and Log_s has "main:")
+| summarize Revisions = countif(Reason_s == "RevisionCreation"), Old = take_anyif(RevisionName_s, Reason_s == "RevisionCreation"),
+    Pulled = make_set_if(RevisionName_s, Reason_s == "PulledImage") by App = ContainerAppName_s, Bin = bin_at(TimeGenerated, BinSize, Start)
+| where Revisions > 0
+| extend New = set_difference(Pulled, pack_array(Old))
+| extend Revision = iff(array_length(New) > 0, strcat_array(New, ", "), strcat("replacing ", Old))
+| project App, Bin, Revisions, Revision;
+let Warnings = ContainerAppConsoleLogs_CL
+| where TimeGenerated between (Start .. End) and ContainerAppName_s in~ (Apps) and Log_s startswith "entrypoint: WARNING"
+| summarize Warnings = count(), Warning = take_any(substring(Log_s, 0, 200)) by App = ContainerAppName_s, Bin = bin_at(TimeGenerated, BinSize, Start);
+union Deploys, Warnings
+| summarize Apps = strcat_array(make_set(App), ", "), Revisions = sum(Revisions), Warnings = sum(Warnings),
+    Revision = take_any(Revision), Warning = take_any(Warning) by Bin   // one card per bin: a deploy rolls both apps
+| project Bin, Apps, Revisions, Warnings, Revision, Warning

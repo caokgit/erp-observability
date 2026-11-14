@@ -1,0 +1,72 @@
+// L5 job queue (docs/specs/round-1.md#signals, round 7: docs/specs/round-7.md), from the SQL job's rows
+// (job/sql_job.py). Per run: the late channels (a ReadyState row whose wait is over MaxReadyAgeMin); the queue is
+// behind when MinLateChannels or more are late, or one late channel holds MinLateJobs or more; fewer is a stall.
+// Per bin, the last run gives "pending" (jobs pending), "behind", "failed" (failed in the last hour, the worst model),
+// "size" (queue_job's total bytes) and "dead" (jobs found dead in the last 24 h, the worst model); "stall" is any stalled
+// run in the StallMemory before the bin's end, so one cause makes one alert. LastBinOnly keeps the newest bin (the
+// alert); a backtest keeps every bin. The alert splits by Check.
+// Parameters: TargetEnv, Checks, MaxPending, ReadyState, MaxReadyAgeMin, MinLateChannels, MinLateJobs,
+// MaxFailedPerModel, MaxBytes, MaxDead, StallMemory, LastBinOnly, Start, End, BinSize.
+let Rows = OdooQueue_CL | where TimeGenerated between ((Start - StallMemory) .. End) and Env == TargetEnv;
+let LateChannels = Rows
+    | where Check == "backlog" and State == ReadyState and OldestAgeSec > MaxReadyAgeMin * 60
+    | project RunId, Channel, Count, WaitMin = tolong(round(OldestAgeSec / 60.0))
+    | join kind=leftouter (Rows | where Check == "backlog" and State == "running"
+        | project RunId, Channel, RunningMin = tolong(round(OldestAgeSec / 60.0))) on RunId, Channel
+    | extend Text = strcat(Channel, ": ", Count, " ready, ", WaitMin, " min", iff(isnull(RunningMin), "",
+        strcat(", running ", RunningMin, " min")));
+let Late = LateChannels
+    | summarize Late = count(), MostInOne = max(Count), Channels = make_set(Channel), LateText = strcat_array(make_list(Text), "; ")
+      by RunId;
+let FailedPerRun = Rows
+    | where Check == "failed_1h"
+    | summarize Failed = sum(Count) by RunId, Model
+    | summarize arg_max(Failed, Model) by RunId;
+let DeadPerRun = Rows
+    | where Check == "dead_24h"
+    | summarize Dead = sum(Count) by RunId, DeadModel = strcat(Model, ".", Method)
+    | summarize DeadTotal = sum(Dead), arg_max(Dead, DeadModel) by RunId
+    | project RunId, Dead = DeadTotal, DeadModel;
+let PerRun = Rows
+    | summarize TimeGenerated = max(TimeGenerated),
+        Pending = sumif(Count, Check == "backlog" and State == "pending"),
+        Bytes = maxif(Bytes, Check == "table")
+      by RunId
+    | join kind=leftouter Late on RunId
+    | join kind=leftouter FailedPerRun on RunId
+    | join kind=leftouter DeadPerRun on RunId
+    | extend Late = coalesce(Late, 0), MostInOne = coalesce(MostInOne, 0)
+    | extend Behind = Late >= MinLateChannels or MostInOne >= MinLateJobs
+    | extend Stalled = Late > 0 and not(Behind);
+let LastPerBin = PerRun
+    | where TimeGenerated between (Start .. End)
+    | summarize arg_max(TimeGenerated, *) by Bin = bin_at(TimeGenerated, BinSize, Start)
+    | where not(LastBinOnly) or Bin + BinSize >= End;
+let StallPerBin = LastPerBin
+    | project Bin, k = 1
+    | join kind=inner (PerRun | where Stalled | project ST = TimeGenerated, Channels, LateText, k = 1) on k
+    | where ST > Bin + BinSize - StallMemory and ST <= Bin + BinSize
+    | mv-expand Channel = Channels to typeof(string)
+    | summarize StallRuns = dcount(ST), StallChannels = strcat_array(make_set(Channel), ", "),
+        arg_max(ST, LastText = LateText) by Bin;
+LastPerBin
+| join kind=leftouter StallPerBin on Bin
+| extend Values = pack_array(
+    bag_pack("Check", "pending", "Value", todouble(coalesce(Pending, 0)), "Threshold", todouble(MaxPending),
+        "Fires", coalesce(Pending, 0) > MaxPending, "Detail", ""),
+    bag_pack("Check", "behind", "Value", todouble(Late), "Threshold", todouble(MinLateChannels),
+        "Fires", Behind, "Detail", coalesce(LateText, "")),
+    bag_pack("Check", "failed", "Value", todouble(coalesce(Failed, 0)), "Threshold", todouble(MaxFailedPerModel),
+        "Fires", coalesce(Failed, 0) > MaxFailedPerModel, "Detail", coalesce(Model, "")),
+    bag_pack("Check", "size", "Value", todouble(coalesce(Bytes, 0)), "Threshold", todouble(MaxBytes),
+        "Fires", coalesce(Bytes, 0) > MaxBytes, "Detail", ""),
+    bag_pack("Check", "stall", "Value", todouble(coalesce(StallRuns, 0)), "Threshold", 0.0,
+        "Fires", coalesce(StallRuns, 0) > 0, "Detail", strcat(coalesce(StallChannels, ""), iff(isempty(LastText), "",
+        strcat(" (last: ", LastText, ")")))),
+    bag_pack("Check", "dead", "Value", todouble(coalesce(Dead, 0)), "Threshold", todouble(MaxDead),
+        "Fires", coalesce(Dead, 0) > MaxDead, "Detail", coalesce(DeadModel, "")))
+| mv-expand V = Values
+| extend Check = tostring(V.Check), Value = todouble(V.Value), Threshold = todouble(V.Threshold),
+    Fires = tobool(V.Fires), Detail = tostring(V.Detail)
+| where Check in (Checks) and Fires
+| project Bin, Check, Value, Threshold, Detail

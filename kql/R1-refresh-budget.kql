@@ -1,0 +1,9 @@
+// R1 the view refresh over its budget (docs/specs/round-2.md#signals): the slow-statement log's refreshes of View that
+// took longer than BudgetSec, the refresh's own schedule. One row per server and bin.
+// Parameters: Servers, Start, End, View, BudgetSec, BinSize.
+PgLogs(Servers)
+| where Message has "REFRESH MATERIALIZED VIEW" and Message has View and Message has "duration:"
+| extend Sec = todouble(extract(@"duration: ([0-9.]+) ms", 1, Message)) / 1000
+| where Sec > BudgetSec
+| summarize Refreshes = count(), LongestSec = round(max(Sec)) by Server, Bin = bin_at(TimeGenerated, BinSize, Start)
+| project Bin, Server, Refreshes, LongestSec

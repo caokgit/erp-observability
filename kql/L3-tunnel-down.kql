@@ -1,0 +1,15 @@
+// L3 VPN tunnel down (docs/specs/round-1.md#signals). The tunnel log holds only state changes, per gateway
+// instance (active-active): a Disconnected is down until the same instance's next event, or until End.
+// OngoingOnly true (the alert): only instances still down. False (the backtest): every outage in the range.
+// One row per outage longer than DownMin.
+// Parameters: Gateway, DownMin, OngoingOnly, Start, End.
+AzureDiagnostics
+| where TimeGenerated between (Start .. End) and Category == "TunnelDiagnosticLog" and Resource =~ Gateway
+| where OperationName in ("TunnelConnected", "TunnelDisconnected")
+| project TimeGenerated, Instance = instance_s, Status = status_s
+| order by Instance asc, TimeGenerated asc
+| extend NextAt = iff(next(Instance) == Instance, next(TimeGenerated), datetime(null))
+| where Status == "Disconnected"
+| extend DownFor = coalesce(NextAt, End) - TimeGenerated, Ongoing = isnull(NextAt)
+| where DownFor > DownMin and (not(OngoingOnly) or Ongoing)
+| project Bin = TimeGenerated, Instance, DownHours = round(DownFor / 1h, 2), Ongoing

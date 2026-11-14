@@ -1,0 +1,109 @@
+# The track's pipeline (docs/specs/pipeline.md#the-workflow): tools/ci.sh's steps, the same checks as on the laptop,
+# in four jobs side by side. Offline by design: no Azure login, no secret, no federated credential (one would name the
+# repo inside the client's tenant, which the ground rules forbid). Applies stay on the laptop behind obs.sh plan's gates.
+# On a pull request and a push, terraform, python and kubernetes run their steps only when the change touches their
+# paths (tools/ci-paths.sh; a range it cannot read runs everything); docs-and-secrets always runs. The weekly run and a
+# manual run check everything. Each job runs named steps of tools/ci.sh, each step commented there (repo_trace: nothing
+# that reaches Azure names this repo; aws_test: the AWS design's module tests). A job that skips its checks still
+# passes: its log's step "Nothing this job checks changed" says so.
+name: ci
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "23 2 * * 1" # Mondays 02:23 UTC: a pinned download or a tool's site that broke outside the repo
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  terraform:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # a push may carry many commits: the range's first parent must be here
+          persist-credentials: false
+      - name: Does this change touch what this job checks?
+        id: paths
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        env: # a pull request: the test merge commit against its base; a push: the commit before it against the one after
+          RANGE: ${{ github.event_name == 'push' && format('{0}..{1}', github.event.before, github.sha) || 'HEAD^1..HEAD' }}
+        run: tools/ci-paths.sh terraform "$RANGE"
+      - name: Nothing this job checks changed; its checks are skipped
+        if: steps.paths.outputs.run == 'false'
+        run: echo "No Terraform, policy, KQL or the scripts that check them in this change"
+      - name: Install the pinned tools (versions and SHA-256 in tools/ci-tools.sh)
+        if: steps.paths.outputs.run != 'false'
+        run: bash tools/ci-tools.sh
+      - name: fmt, validate, tflint, Trivy config, the policies, the AWS module's tests, the repo-trace scan
+        if: steps.paths.outputs.run != 'false'
+        run: bash tools/ci.sh fmt validate tflint trivy_config policy aws_test repo_trace
+
+  python:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Does this change touch what this job checks?
+        id: paths
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        env:
+          RANGE: ${{ github.event_name == 'push' && format('{0}..{1}', github.event.before, github.sha) || 'HEAD^1..HEAD' }}
+        run: tools/ci-paths.sh python "$RANGE"
+      - name: Nothing this job checks changed; its checks are skipped
+        if: steps.paths.outputs.run == 'false'
+        run: echo "No job, KQL, SQL, Python tool or AWS cost script in this change"
+      - name: Install the pinned tools (versions and SHA-256 in tools/ci-tools.sh)
+        if: steps.paths.outputs.run != 'false'
+        run: bash tools/ci-tools.sh
+      - name: Trivy on the job's packages, bandit, the unit tests, the SQL on a throwaway PostgreSQL
+        if: steps.paths.outputs.run != 'false'
+        run: bash tools/ci.sh trivy_deps bandit unit sql
+
+  kubernetes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Does this change touch what this job checks?
+        id: paths
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        env:
+          RANGE: ${{ github.event_name == 'push' && format('{0}..{1}', github.event.before, github.sha) || 'HEAD^1..HEAD' }}
+        run: tools/ci-paths.sh kubernetes "$RANGE"
+      - name: Nothing this job checks changed; its checks are skipped
+        if: steps.paths.outputs.run == 'false'
+        run: echo "No PromQL rule or its tests in this change"
+      - name: Install the pinned tools (versions and SHA-256 in tools/ci-tools.sh)
+        if: steps.paths.outputs.run != 'false'
+        run: bash tools/ci-tools.sh
+      - name: The PromQL rules checked and unit-tested with promtool
+        if: steps.paths.outputs.run != 'false'
+        run: bash tools/ci.sh promtool
+
+  docs-and-secrets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # gitleaks reads every commit
+          persist-credentials: false
+      - name: Install the pinned tools (versions and SHA-256 in tools/ci-tools.sh)
+        run: bash tools/ci-tools.sh
+      - name: Links, anchors, secrets and ids in the docs; gitleaks over the whole history
+        run: bash tools/ci.sh docs gitleaks

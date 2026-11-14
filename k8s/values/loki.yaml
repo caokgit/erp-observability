@@ -1,0 +1,24 @@
+# On top of the lab's common and kind values: the ruler, which runs the LogQL rules (k8s/rules/loki-rules.yaml), sends
+# alerts to Alertmanager and writes the SLO's recorded series to Prometheus.
+loki:
+  rulerConfig:
+    storage:
+      type: local
+      local: {directory: /etc/loki/rules}
+    rule_path: /var/loki/rules-temp
+    alertmanager_url: http://kps-alertmanager.monitoring.svc:9093
+    enable_api: true
+    evaluation_interval: 30s
+    remote_write:
+      enabled: true
+      client:
+        url: http://kps-prometheus.monitoring.svc:9090/api/v1/write
+    wal:
+      dir: /var/loki/ruler-wal
+singleBinary:
+  extraVolumes:
+    - name: rules
+      configMap: {name: loki-rules}
+  extraVolumeMounts:
+    - name: rules
+      mountPath: /etc/loki/rules/fake   # the tenant without auth

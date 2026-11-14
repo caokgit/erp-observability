@@ -1,0 +1,14 @@
+// L7 app terminations (docs/specs/round-1.md#signals): per app and bin, a container killed with exit code 137
+// (out of memory), a crash loop: at least MinExited "ProcessExited" events and at least MinRestarts containers "main"
+// created (one restart alone writes 3 to 9 exit records, docs/specs/round-6.md#1-l7-counts-restarts), or at least
+// MinProbeKills containers killed by Azure after failed health probes (the 2026-08-20 and 09-09 kills: workers all
+// busy, the probe timed out).
+// Parameters: Apps, MinExited, MinRestarts, MinProbeKills, Start, End, BinSize.
+ContainerAppSystemLogs_CL
+| where TimeGenerated between (Start .. End) and ContainerAppName_s in~ (Apps)
+| summarize OomKills = countif(Log_s has "exit code '137'"), Exited = countif(Reason_s == "ProcessExited"),
+    Restarts = countif(Reason_s == "ContainerCreated" and Log_s has "'main'"),
+    ProbeKills = countif(Reason_s == "ContainerTerminated" and Log_s has "reason 'ProbeFailure'")
+    by App = ContainerAppName_s, Bin = bin_at(TimeGenerated, BinSize, Start)
+| where OomKills > 0 or (Exited >= MinExited and Restarts >= MinRestarts) or ProbeKills >= MinProbeKills
+| project Bin, App, OomKills, Exited, Restarts, ProbeKills

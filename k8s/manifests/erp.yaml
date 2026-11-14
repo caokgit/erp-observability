@@ -1,0 +1,161 @@
+# The demonstration ERP (docs/specs/kubernetes-mapping.md#the-workload): PostgreSQL, the public Odoo image with the
+# incident lab add-on, postgres_exporter with the SQL job's queries, and a traffic loop for the two journeys. Lab only:
+# the password below is the lab's, in no other place.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: postgres, namespace: erp}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: postgres}}
+  template:
+    metadata: {labels: {app: postgres}}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          # Q1's source: pg_stat_statements needs its library loaded at start (the lab's server, not the client's)
+          args: ["-c", "shared_preload_libraries=pg_stat_statements"]
+          env:
+            - {name: POSTGRES_USER, value: odoo}
+            - {name: POSTGRES_PASSWORD, value: lab-only}
+            - {name: POSTGRES_DB, value: postgres}
+          ports: [{containerPort: 5432}]
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+      volumes: [{name: data, emptyDir: {}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: postgres, namespace: erp}
+spec: {selector: {app: postgres}, ports: [{port: 5432}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: odoo, namespace: erp, labels: {app.kubernetes.io/name: odoo}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: odoo}}
+  template:
+    metadata: {labels: {app: odoo, app.kubernetes.io/name: odoo}}
+    spec:
+      containers:
+        - name: odoo
+          image: odoo:19.0
+          args: ["odoo", "-d", "erp", "-i", "incident_lab", "--db-filter", "^erp$", "--max-cron-threads", "1",
+                 "--addons-path", "/usr/lib/python3/dist-packages/odoo/addons,/mnt/extra-addons"]
+          env:
+            - {name: HOST, value: postgres}
+            - {name: USER, value: odoo}
+            - {name: PASSWORD, value: lab-only}
+          ports: [{containerPort: 8069}]
+          readinessProbe:
+            httpGet: {path: /web/health, port: 8069}
+            periodSeconds: 10
+          # The memory limit the OOM drill crosses; Odoo in threaded mode sets none of its own
+          resources: {requests: {cpu: 100m, memory: 384Mi}, limits: {memory: 1Gi}}
+          volumeMounts: [{name: addon, mountPath: /mnt/extra-addons/incident_lab}]
+      volumes:
+        - name: addon
+          configMap: {name: incident-lab}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: odoo, namespace: erp}
+spec: {selector: {app: odoo}, ports: [{port: 8069}]}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: exporter-queries, namespace: erp}
+data:
+  queries.yaml: |
+    # L1: the longest lock wait in progress (Prometheus samples it, so the alert fires while the wait lasts); the
+    # same query as the SQL job's round 4 reading on Azure (job/sql_job.py): pg_locks.waitstart, readable by every role
+    erp_lock_wait:
+      query: >-
+        SELECT coalesce(max(extract(epoch FROM clock_timestamp() - l.waitstart)), 0)::float8 AS max_seconds,
+               count(DISTINCT l.pid)::float8 AS waiting
+          FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+         WHERE NOT l.granted AND l.waitstart IS NOT NULL AND a.datname = current_database()
+      metrics:
+        - max_seconds: {usage: GAUGE, description: "Longest lock wait in progress, seconds since it began"}
+        - waiting: {usage: GAUGE, description: "Sessions waiting for a lock"}
+    # L6: the SQL job's ir_cron query (job/sql_job.py), overdue seconds and the interval per active task
+    erp_cron:
+      query: >-
+        SELECT coalesce(cron_name, id::text) AS name,
+               extract(epoch FROM (now() AT TIME ZONE 'UTC') - nextcall)::float8 AS overdue_seconds,
+               (interval_number * CASE interval_type WHEN 'minutes' THEN 60 WHEN 'hours' THEN 3600
+                  WHEN 'days' THEN 86400 WHEN 'weeks' THEN 604800 WHEN 'months' THEN 2592000 END)::float8 AS interval_seconds
+          FROM public.ir_cron WHERE active
+      metrics:
+        - name: {usage: LABEL, description: "The task's name"}
+        - overdue_seconds: {usage: GAUGE, description: "Seconds since the task's next run was due"}
+        - interval_seconds: {usage: GAUGE, description: "The task's interval, seconds"}
+    # Q1: the database time of the database's statements since the statistics began (pg_stat_statements, created by
+    # lab.sh); Prometheus turns the counter into minutes per hour. A statement counts when it ends
+    erp_db_time:
+      query: >-
+        SELECT coalesce(sum(total_exec_time), 0)::float8 / 1000 AS seconds_total
+          FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+      metrics:
+        - seconds_total: {usage: COUNTER, description: "Database time of the database's statements, seconds"}
+    # T1: the SQL job's table statistics (job/sql_job.py), per table with dead rows
+    erp_table:
+      query: >-
+        SELECT relname AS table, n_dead_tup::float8 AS dead_rows, n_live_tup::float8 AS live_rows,
+               coalesce(extract(epoch FROM last_autovacuum), 0)::float8 AS last_autovacuum_seconds
+          FROM pg_stat_user_tables WHERE n_dead_tup > 0
+      metrics:
+        - table: {usage: LABEL, description: "The table"}
+        - dead_rows: {usage: GAUGE, description: "Dead rows"}
+        - live_rows: {usage: GAUGE, description: "Live rows"}
+        - last_autovacuum_seconds: {usage: GAUGE, description: "The last autovacuum, epoch seconds; 0 if never"}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: postgres-exporter, namespace: erp}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: postgres-exporter}}
+  template:
+    metadata: {labels: {app: postgres-exporter}}
+    spec:
+      containers:
+        - name: exporter
+          image: quay.io/prometheuscommunity/postgres-exporter:v0.17.1
+          args: ["--extend.query-path=/etc/exporter/queries.yaml"]
+          env:
+            - {name: DATA_SOURCE_NAME, value: "postgresql://odoo:lab-only@postgres:5432/erp?sslmode=disable"}
+          ports: [{name: metrics, containerPort: 9187}]
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 96Mi}}
+          volumeMounts: [{name: queries, mountPath: /etc/exporter}]
+      volumes: [{name: queries, configMap: {name: exporter-queries}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: postgres-exporter, namespace: erp, labels: {app: postgres-exporter}}
+spec: {selector: {app: postgres-exporter}, ports: [{name: metrics, port: 9187}]}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata: {name: postgres-exporter, namespace: erp}
+spec:
+  selector: {matchLabels: {app: postgres-exporter}}
+  endpoints: [{port: metrics, interval: 15s}]
+---
+# Background traffic, so the SLO has good requests to weigh the bad against: the TV poll every 2 s, a page every 10 s
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: traffic, namespace: erp}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: traffic}}
+  template:
+    metadata: {labels: {app: traffic}}
+    spec:
+      containers:
+        - name: loop
+          image: busybox:1.37
+          command: ["sh", "-c", "i=0; while true; do wget -q -O /dev/null http://odoo:8069/erp/tv/data; i=$((i+1)); [ $((i % 5)) -eq 0 ] && wget -q -O /dev/null http://odoo:8069/web/login; sleep 2; done"]
+          resources: {requests: {cpu: 5m, memory: 8Mi}, limits: {memory: 32Mi}}

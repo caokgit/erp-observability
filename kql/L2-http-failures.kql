@@ -1,0 +1,12 @@
+// L2 HTTP failures (docs/specs/round-1.md#signals): nginx access lines of the apps' nginx sidecar, by class.
+// Class "5xx": any status 500 to 599, so a new code cannot slip through; Class "499": the user gave up.
+// One row per app and bin with at least MinCount lines of the class.
+// Parameters: Apps, Class, MinCount, Start, End, BinSize.
+ContainerAppConsoleLogs_CL
+| where TimeGenerated between (Start .. End) and ContainerAppName_s in~ (Apps) and ContainerName_s == "nginx"
+| extend Status = toint(extract(@"\] ""[^""]*"" ([0-9]{3}) ", 1, Log_s))
+| extend StatusClass = case(Status between (500 .. 599), "5xx", Status == 499, "499", "")
+| where StatusClass == Class
+| summarize Requests = count(), Codes = make_set(Status) by App = ContainerAppName_s, Bin = bin_at(TimeGenerated, BinSize, Start)
+| where Requests >= MinCount
+| project Bin, App, Requests, Codes

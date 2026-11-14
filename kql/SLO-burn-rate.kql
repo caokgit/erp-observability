@@ -1,0 +1,27 @@
+// SLO burn rate (docs/specs/round-3.md#slos): how fast stg's web app spends its 30-day error budget, per journey.
+// SLI: requests answered without a 5xx over all requests, from the apps' nginx access lines. Not counted: 499 (the
+// client left before any answer), 101 and /websocket (long-lived upgrades, not a request-answer), lines that are not
+// access lines. Journeys: "tv" (the factory TV dashboards' polling, /erp/tv/) and "interactive" (everything else).
+// Burn rate = the error rate over a window / the budget's rate (1 - Slo). A row fires when both windows burn faster
+// than Factor and the long window holds at least MinBad bad requests (a guard for quiet hours).
+// One row per journey and BinSize step whose trailing windows end at that step; only steps at or after
+// max(Start + LongWindow, End - ReportWindow) are reported: the alert reports its last steps, a backtest every step.
+// Parameters: Apps, Slo, Factor, LongWindow, ShortWindow, MinBad, BinSize, ReportWindow, TvPrefix, Start, End.
+let LongSteps = toint(LongWindow / BinSize);
+let ShortSteps = toint(ShortWindow / BinSize);
+ContainerAppConsoleLogs_CL
+| where TimeGenerated between (Start .. End) and ContainerAppName_s in~ (Apps) and ContainerName_s == "nginx"
+| extend Status = toint(extract(@"\] ""[^""]*"" ([0-9]{3}) ", 1, Log_s)), Path = extract(@"\] ""[A-Z]+ (/[^? ]*)", 1, Log_s)
+| where isnotnull(Status) and Status != 499 and Status != 101 and not(Path startswith "/websocket")
+| extend Journey = iff(Path startswith TvPrefix, "tv", "interactive"), IsBad = toint(Status between (500 .. 599))
+| make-series Total = count(), Bad = sum(IsBad) default = 0 on TimeGenerated from bin_at(Start, BinSize, Start) to End step BinSize by Journey
+| extend TotalLong = series_fir(Total, repeat(1, LongSteps), false, false), BadLong = series_fir(Bad, repeat(1, LongSteps), false, false),
+    TotalShort = series_fir(Total, repeat(1, ShortSteps), false, false), BadShort = series_fir(Bad, repeat(1, ShortSteps), false, false)
+| mv-expand Step = TimeGenerated to typeof(datetime), TotalLong to typeof(long), BadLong to typeof(long),
+    TotalShort to typeof(long), BadShort to typeof(long)
+| where Step >= max_of(Start + LongWindow - BinSize, End - ReportWindow)
+| extend BurnLong = iff(TotalLong > 0, todouble(BadLong) / TotalLong / (1 - Slo), 0.0),
+    BurnShort = iff(TotalShort > 0, todouble(BadShort) / TotalShort / (1 - Slo), 0.0)
+| where BurnLong > Factor and BurnShort > Factor and BadLong >= MinBad
+| project Bin = Step + BinSize, Journey, BurnLong = round(BurnLong, 1), BurnShort = round(BurnShort, 1), BadLong, TotalLong,
+    BadShort, TotalShort

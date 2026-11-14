@@ -1,0 +1,9 @@
+// L6 late scheduled tasks (docs/specs/round-1.md#signals), from the SQL job's rows: an active task whose next run
+// is overdue by more than its interval plus GraceMin, and by at least MinLateMin. One row per task and bin.
+// Parameters: TargetEnv, GraceMin, MinLateMin, Start, End, BinSize.
+OdooCron_CL
+| where TimeGenerated between (Start .. End) and Env == TargetEnv
+| summarize arg_max(TimeGenerated, *) by CronId, Bin = bin_at(TimeGenerated, BinSize, Start)
+| extend LateAfterSec = max_of(IntervalSec + GraceMin * 60, MinLateMin * 60)
+| where OverdueSec > LateAfterSec
+| project Bin, CronId, CronName, OverdueHours = round(OverdueSec / 3600.0, 1), IntervalSec, NextCall, LastCall

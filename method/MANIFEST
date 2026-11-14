@@ -1,0 +1,14 @@
+# The files copied from the lab into every sibling repo by tools/sync-method.sh (docs/specs/method.md).
+# One path per line, relative to the repo's root. Each repo's tools/repo.toml and AGENTS.md are never listed here.
+method/METHOD.md
+method/README.md
+method/MANIFEST
+method/templates/journal-entry.md
+method/templates/runbook-page.md
+method/templates/learn-section.md
+method/templates/review.md
+method/templates/postmortem.md
+tools/check-docs.py
+tools/hooks/commit-msg
+tools/mask.py
+tools/sync-method.sh

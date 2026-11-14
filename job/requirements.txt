@@ -1,0 +1,4 @@
+# Pinned on 2026-11-08 (PyPI); the image installs exactly these.
+psycopg[binary]==3.3.8
+azure-monitor-ingestion==1.1.0
+azure-identity==1.27.0

@@ -1,0 +1,28 @@
+// L1 lock waits (docs/specs/round-1.md#signals). One row per server and 5-min bin that breaches.
+// Kind "long_wait": a wait over MinWaitMs ("still waiting ... after N ms" or "acquired ... after N ms").
+// Kind "burst": more than MinStillWaiting "still waiting" lines in the bin, or (round 5) more than MinCancelled statements
+// cancelled by the lock timeout, or at least MinFailed requests Odoo failed after its last try (the log reader's
+// "lock_failed" rows, docs/specs/round-5.md).
+// Round 4: a wait still in progress, from the SQL job's "lock_wait" row (job/sql_job.py, pg_locks.waitstart), pages
+// while it lasts; the log has a line only when a long wait ends.
+// Parameters: Servers, TargetEnv, Kind, MinWaitMs, MinStillWaiting, MinCancelled, MinFailed, Start, End, BinSize.
+let FromLog = PgLogs(Servers)
+| where Message has "still waiting for" or (Message has " acquired " and Message has " after ")
+    or Message has "canceling statement due to lock timeout"
+| extend WaitMs = todouble(extract(@" after ([0-9.]+) ms", 1, Message)), Still = Message has "still waiting for",
+    Cancel = Message has "canceling statement due to lock timeout"
+| summarize MaxWaitMs = max(WaitMs), StillWaiting = countif(Still), Cancelled = countif(Cancel)
+    by Server, Bin = bin_at(TimeGenerated, BinSize, Start);
+let InProgress = OdooQueue_CL
+| where TimeGenerated between (Start .. End) and Env == TargetEnv and Check == "lock_wait"
+| summarize MaxWaitSec = max(OldestAgeSec) by Server = strcat(Database, " (in progress)"), Bin = bin_at(TimeGenerated, BinSize, Start)
+| extend MaxWaitMs = MaxWaitSec * 1000.0, StillWaiting = 0, Cancelled = 0
+| project-away MaxWaitSec;
+let Failed = OdooLog_CL
+| where TimeGenerated between (Start .. End) and Env == TargetEnv and Kind == "lock_failed"
+| summarize Failed = sum(Count) by Server = "Odoo (requests failed)", Bin = bin_at(TimeGenerated, BinSize, Start);
+union FromLog, InProgress, Failed
+| extend StillWaiting = coalesce(StillWaiting, 0), Cancelled = coalesce(Cancelled, 0), Failed = coalesce(Failed, 0)
+| where (Kind == "long_wait" and MaxWaitMs > MinWaitMs)
+    or (Kind == "burst" and (StillWaiting > MinStillWaiting or Cancelled > MinCancelled or Failed >= MinFailed))
+| project Bin, Server, MaxWaitSec = round(MaxWaitMs / 1000, 1), StillWaiting, Cancelled, Failed

@@ -1,0 +1,489 @@
+{
+  "_about": "Round 1's log rules (docs/specs/round-1.md#signals). Read by terraform/modules/alerts and kql/backtest.py. Each rule runs its file with these parameters prepended as KQL let statements, after the environment's targets (Servers, Apps, Gateway, TargetEnv, TargetDatabaseId) and the time range (Start = ago(lookback), End = now()). Values are KQL literals. Round 2: \"envs\" lists the environments a rule exists in (default both), \"enabled_in\" those where it runs outside drills. Round 3: \"backtest_params\" override params in backtests only (the SLO rules report every step there). S4: \"about\" and \"first_steps\" are the rule's description in Azure, shown on its Teams card (docs/specs/round-3.md#incident-response); they name no repo path, server, app or person. Round 4: L1-wait also reads the job's \"lock_wait\" rows; E1 tickets deploys and entrypoint warnings.",
+  "rules": {
+    "L1-wait": {
+      "file": "L1-lock-waits.kql",
+      "functions": [
+        "functions/pg_logs.kql"
+      ],
+      "title": "Lock wait over 60 s",
+      "group": "page",
+      "severity": 1,
+      "frequency": "PT5M",
+      "window": "PT10M",
+      "lookback": "10m",
+      "params": {
+        "Kind": "\"long_wait\"",
+        "MinWaitMs": "60000",
+        "MinStillWaiting": "40",
+        "BinSize": "5m",
+        "MinCancelled": "12",
+        "MinFailed": "1"
+      },
+      "dimensions": [],
+      "about": "A statement on the Odoo database waited over 60 s for a lock. Each waiting web request holds one Odoo worker; when all are held the health probe fails and Azure kills the container, and every user in flight gets a 502 (2026-08-20: 84, then 113).",
+      "first_steps": [
+        "Open in Azure: the row gives the server and the longest wait.",
+        "In the server's Postgres log, read the lines just before: the waiting process, the process holding the lock, and both statements.",
+        "Check the same minutes for 5xx (L2) and restarts (M1, M2) on the apps.",
+        "If waits continue or users see 502s: call the ERP team with the holding process and its statement. Ending a session is their call; the track only reads."
+      ]
+    },
+    "L1-burst": {
+      "file": "L1-lock-waits.kql",
+      "functions": [
+        "functions/pg_logs.kql"
+      ],
+      "title": "Burst of lock waits or lock timeouts",
+      "group": "ticket",
+      "severity": 3,
+      "frequency": "PT15M",
+      "window": "PT15M",
+      "lookback": "15m",
+      "params": {
+        "Kind": "\"burst\"",
+        "MinWaitMs": "60000",
+        "MinStillWaiting": "40",
+        "BinSize": "5m",
+        "MinCancelled": "12",
+        "MinFailed": "1"
+      },
+      "dimensions": [],
+      "about": "More than 40 lock waits, or more than 12 statements cancelled by the 10 s lock timeout, in 5 minutes, or a request Odoo failed after its 5 tries: contention is stalling work. A cancelled web request is retried by Odoo, background work by its own job; Failed above 0 means a user saw an error (usual level: 3 to 4 cancellations per 5 minutes).",
+      "first_steps": [
+        "Open in Azure: the row gives the server and the counts; Failed above 0 means a user saw an error.",
+        "In the server's Postgres log, group the waits and cancellations by relation: one table or one task usually dominates.",
+        "Check the scheduled tasks and queue jobs running at that time (an import, a bulk update, a cleanup).",
+        "Next working day: send the table, the counts and the times to the ERP team."
+      ]
+    },
+    "L2-5xx": {
+      "file": "L2-http-failures.kql",
+      "functions": [],
+      "title": "HTTP 5xx burst",
+      "group": "page",
+      "severity": 1,
+      "frequency": "PT5M",
+      "window": "PT5M",
+      "lookback": "5m",
+      "params": {
+        "Class": "\"5xx\"",
+        "MinCount": "25",
+        "BinSize": "5m"
+      },
+      "dimensions": [],
+      "about": "25 or more requests answered 5xx in 5 minutes. A burst of 502 means the app had no backend (a container killed or starting); 500 means Odoo answered with its own error (2026-08-20 evening: every TV poll got 500 after a deploy).",
+      "first_steps": [
+        "Look at the codes on the row: 502 or 500, and which app.",
+        "502: check the app's system log for a ProbeFailure kill or a restart in the same minutes, and lock waits (L1).",
+        "500: check the app's revisions for a deploy in the last hour, and Odoo's console lines for the error.",
+        "Call the ERP team with the codes, the paths and any deploy time; a rollback is theirs."
+      ]
+    },
+    "L2-499": {
+      "file": "L2-http-failures.kql",
+      "functions": [],
+      "title": "HTTP 499 burst (users gave up)",
+      "group": "ticket",
+      "severity": 3,
+      "frequency": "PT15M",
+      "window": "PT15M",
+      "lookback": "15m",
+      "params": {
+        "Class": "\"499\"",
+        "MinCount": "25",
+        "BinSize": "5m"
+      },
+      "dimensions": [],
+      "about": "25 or more requests in 5 minutes where the user gave up before an answer: pages slow enough that people leave. It often comes just before a 502 burst (2026-08-20 03:05: 39 users gave up, then the container was killed).",
+      "first_steps": [
+        "Open in Azure: the app and the count.",
+        "Check the same minutes for 502s (L2-5xx), lock waits (L1) and a busy database (M3, Q1).",
+        "Find the slowest paths in the nginx lines of that window.",
+        "Next working day: the paths and times to the ERP team."
+      ]
+    },
+    "L3": {
+      "file": "L3-tunnel-down.kql",
+      "functions": [],
+      "title": "VPN tunnel down",
+      "group": "page",
+      "severity": 1,
+      "frequency": "PT5M",
+      "window": "P2D",
+      "lookback": "2d",
+      "params": {
+        "DownMin": "5m",
+        "OngoingOnly": "true"
+      },
+      "backtest_params": {
+        "OngoingOnly": "false"
+      },
+      "dimensions": [],
+      "about": "A VPN tunnel to on-prem has been down over 5 minutes and is still down. Imports from the on-prem SQL Server stop and their queue jobs fail (2026-09-21: down 6.7 h).",
+      "first_steps": [
+        "Open in Azure: which gateway instance, and since when (the other instance may still be up).",
+        "In the gateway's IKE log, read the error codes around the drop (L4).",
+        "Watch failed queue jobs (L5) for the sync models.",
+        "Call the platform team; the on-prem side (the firewall, the peer) is the on-prem team's."
+      ]
+    },
+    "L4": {
+      "file": "L4-ike-errors.kql",
+      "functions": [],
+      "title": "IKE negotiation errors",
+      "group": "ticket",
+      "severity": 3,
+      "frequency": "PT15M",
+      "window": "PT15M",
+      "lookback": "15m",
+      "params": {
+        "IgnoreCodes": "dynamic([0])",
+        "MinErrors": "1",
+        "BinSize": "15m"
+      },
+      "dimensions": [],
+      "about": "An IKE negotiation of the VPN ended with an error code. Usually a rekey that heals by itself; repeated or new codes have come before outages (13805 in 2026-08, 13885 on 2026-09-11).",
+      "first_steps": [
+        "Open in Azure: the code and the time.",
+        "Check the tunnel's state now (L3) and the count of the same code over the last day.",
+        "If the code is new or repeats every hour, check failed sync jobs (L5).",
+        "Next working day: the codes and their rhythm to the platform team."
+      ]
+    },
+    "L5-page": {
+      "file": "L5-job-queue.kql",
+      "functions": [],
+      "title": "Job queue backlog",
+      "group": "page",
+      "severity": 1,
+      "frequency": "PT5M",
+      "window": "PT10M",
+      "lookback": "10m",
+      "params": {
+        "Checks": "dynamic([\"pending\", \"behind\"])",
+        "MaxPending": "5000",
+        "ReadyState": "\"ready\"",
+        "MaxReadyAgeMin": "60",
+        "MinLateChannels": "2",
+        "MinLateJobs": "500",
+        "MaxFailedPerModel": "10",
+        "MaxBytes": "2500000000",
+        "MaxDead": "0",
+        "LastBinOnly": "true",
+        "StallMemory": "0m",
+        "BinSize": "10m"
+      },
+      "dimensions": [
+        "Check"
+      ],
+      "about": "The job queue is behind: jobs ready to run have waited over 60 minutes in 2 or more channels (or 500 in one), or over 5,000 jobs are pending (the Check field says which: behind or pending). Imports from on-prem stop reaching Odoo (2026-08-25: 60,696 pending overnight; 2026-11-10: 865 sync jobs waited 2 h). One late channel alone is L5-ticket's stall.",
+      "first_steps": [
+        "Open the results: Detail lists each late channel, its ready jobs, their wait and the running job's minutes.",
+        "Is the cron app running its jobs? Check its restarts (M2), kills (L7) and worker ends (O1).",
+        "Is the tunnel up (L3)? Most jobs read the on-prem SQL Server.",
+        "Call the ERP team with the check, the late channels and since when."
+      ],
+      "backtest_params": {
+        "LastBinOnly": "false"
+      }
+    },
+    "L5-ticket": {
+      "file": "L5-job-queue.kql",
+      "functions": [],
+      "title": "Job queue failures, stall or size",
+      "group": "ticket",
+      "severity": 3,
+      "frequency": "PT15M",
+      "window": "P1D",
+      "lookback": "1d",
+      "params": {
+        "Checks": "dynamic([\"failed\", \"size\", \"stall\", \"dead\"])",
+        "MaxPending": "5000",
+        "ReadyState": "\"ready\"",
+        "MaxReadyAgeMin": "60",
+        "MinLateChannels": "2",
+        "MinLateJobs": "500",
+        "MaxFailedPerModel": "10",
+        "MaxBytes": "2500000000",
+        "MaxDead": "0",
+        "LastBinOnly": "true",
+        "StallMemory": "1d",
+        "BinSize": "15m"
+      },
+      "dimensions": [
+        "Check"
+      ],
+      "about": "A job queue problem for the ERP team (the Check field says which): failed, over 10 failed jobs of one model in the last hour; stall, one channel's ready jobs waited over 60 minutes in the last 24 h; dead, jobs whose worker ended mid-run in the last 24 h (JobFoundDead; since 2026-11-10 on the endpoint imports); size, queue_job over 2.5 GB. Stall and dead stay open a day after the last case, so one cause makes one ticket.",
+      "first_steps": [
+        "Open the results: Check, the value and Detail (the model, or the channel and its running job).",
+        "Failed or dead: read those jobs in Odoo (Queue Jobs, state Failed; JobFoundDead means the worker ended mid-run).",
+        "Stall: in Queue Jobs, filter on the channel: a started job with a climbing retry is dying and being re-run.",
+        "Size: check that the cleanup of done jobs still runs (L6).",
+        "Next working day: the check, the model or channel and the times to the ERP team."
+      ],
+      "backtest_params": {
+        "LastBinOnly": "false"
+      }
+    },
+    "L6": {
+      "file": "L6-late-cron.kql",
+      "functions": [],
+      "title": "Late scheduled tasks",
+      "group": "ticket",
+      "severity": 3,
+      "frequency": "PT15M",
+      "window": "PT15M",
+      "lookback": "15m",
+      "params": {
+        "GraceMin": "30",
+        "MinLateMin": "60",
+        "BinSize": "15m"
+      },
+      "dimensions": [],
+      "about": "An Odoo scheduled task is overdue by more than its interval plus 30 minutes (at least 60 minutes). Its work has stopped, silently (2026-11-04: the daily Auto-vacuum task stopped; still open).",
+      "first_steps": [
+        "Open in Azure: the task, how late, its last and next run.",
+        "In Odoo (Scheduled Actions), check that the task is active and when it last ran.",
+        "Check the cron app is up (M2, L7) and the queue is moving (L5).",
+        "Next working day: the task to the ERP team (they may have stopped it on purpose)."
+      ]
+    },
+    "L7": {
+      "file": "L7-app-terminations.kql",
+      "functions": [],
+      "title": "App container killed or crash looping",
+      "group": "page",
+      "severity": 1,
+      "frequency": "PT15M",
+      "window": "PT15M",
+      "lookback": "15m",
+      "params": {
+        "MinExited": "3",
+        "MinRestarts": "2",
+        "MinProbeKills": "2",
+        "BinSize": "15m"
+      },
+      "dimensions": [],
+      "about": "An app's container died: killed out of memory (exit 137), exited 3 or more times in 15 minutes with 2 or more restarts (a crash loop; a single restart is M1, M2's ticket), or killed by Azure 2 or more times after failed health probes (every worker busy). Users of the web app get 502s while it restarts.",
+      "first_steps": [
+        "Look at the row: the app, and which count (OomKills, Exited with Restarts, ProbeKills).",
+        "ProbeKills: check lock waits (L1) and long requests just before each kill (the 2026-08-20 pattern).",
+        "OomKills or Exited: read the app's last console lines before each exit, and its memory.",
+        "Call the ERP team with the app, the times and the last lines; a restart or a resize is theirs."
+      ]
+    },
+    "E1": {
+      "file": "E1-changes.kql",
+      "functions": [],
+      "title": "A deploy or an entrypoint warning on an Odoo app",
+      "group": "ticket",
+      "severity": 3,
+      "frequency": "PT15M",
+      "window": "PT15M",
+      "lookback": "15m",
+      "params": {
+        "BinSize": "15m"
+      },
+      "dimensions": [],
+      "about": "An Odoo app got a new revision (a deploy), or its entrypoint printed a WARNING at a container start (a configuration check that failed: 2026-08-20 to 09-23, the memory limit above the container's, read by nobody for 34 days). A deploy is information beside the other cards; a warning is for the ERP team.",
+      "first_steps": [
+        "Look at the row: Revisions (a deploy) or Warnings, and the app.",
+        "A deploy: note its time; if pages follow within the hour (L2, L7, SLO), name the deploy when calling the ERP team.",
+        "A warning: read the line on the card and send it to the ERP team; the configuration is theirs.",
+        "Nothing to do on the platform: the track only reads."
+      ]
+    },
+    "H": {
+      "file": "H-heartbeat.kql",
+      "functions": [],
+      "title": "SQL job heartbeat missing",
+      "group": "page",
+      "severity": 1,
+      "frequency": "PT15M",
+      "window": "PT30M",
+      "lookback": "30m",
+      "params": {
+        "BinSize": "30m"
+      },
+      "dimensions": [],
+      "about": "No heartbeat from the track's SQL job in 30 minutes: the job failed, could not reach the database, or could not write to the workspace. While it is missing, L5, L6 and T1 see nothing.",
+      "first_steps": [
+        "Check the job's last runs and their state in the job's execution history.",
+        "A failed run: read its console log (database login, network, or ingestion refused).",
+        "If the database is unreachable, check the server is alive (M5).",
+        "The job and its role are the track's own: fix it; tell the platform team if the server is the cause."
+      ]
+    },
+    "Q1": {
+      "file": "Q1-heavy-hour.kql",
+      "functions": [],
+      "envs": [
+        "stg"
+      ],
+      "title": "Heavy hour on the Odoo database",
+      "group": "ticket",
+      "severity": 3,
+      "frequency": "PT1H",
+      "window": "PT3H",
+      "lookback": "3h",
+      "params": {
+        "MaxDbMin": "90",
+        "IngestLag": "30m"
+      },
+      "dimensions": [],
+      "about": "The Odoo database used over 90 minutes of query time in one hour (the usual hour is under 69). The row names the 3 costliest query ids.",
+      "first_steps": [
+        "Open in Azure: the hour and the 3 query ids.",
+        "Look the ids up in Query Store (the query text is on the server, not in the workspace).",
+        "Check what ran that hour: imports, reports, a bulk task.",
+        "Next working day: the ids, their text and the hour to the ERP team."
+      ]
+    },
+    "T1": {
+      "file": "T1-table-bloat.kql",
+      "functions": [],
+      "title": "Table bloat autovacuum is losing",
+      "group": "ticket",
+      "severity": 3,
+      "frequency": "PT15M",
+      "window": "PT15M",
+      "lookback": "15m",
+      "params": {
+        "MinDeadPct": "25",
+        "MinDeadRows": "100000",
+        "NoVacuum": "24h",
+        "BinSize": "15m"
+      },
+      "dimensions": [
+        "TableName"
+      ],
+      "about": "A table has 25 % or more dead rows, at least 100,000, and no autovacuum for 24 hours: autovacuum is losing, and the table and its queries grow slower.",
+      "first_steps": [
+        "Open in Azure: the table, its dead rows and its last autovacuum.",
+        "Check long-open transactions on the server (they stop the cleanup).",
+        "Check the table's write rate: a bulk update or a task looping.",
+        "Next working day: to the platform team (vacuum settings) and the ERP team (the writer)."
+      ]
+    },
+    "O1": {
+      "file": "O1-workers-killed.kql",
+      "functions": [],
+      "title": "Odoo workers at their limits",
+      "group": "page",
+      "severity": 1,
+      "frequency": "PT5M",
+      "window": "PT15M",
+      "lookback": "15m",
+      "params": {
+        "Kinds": "dynamic([\"memory_limit\", \"cpu_limit\", \"timeout\", \"critical\"])",
+        "MinKills": "3",
+        "BinSize": "15m"
+      },
+      "dimensions": [],
+      "about": "Odoo stated 3 or more worker ends in 15 minutes: a memory or CPU limit reached, a timeout, or a critical worker error. Requests in flight on those workers fail.",
+      "first_steps": [
+        "Open in Azure: the count by kind (memory_limit, cpu_limit, timeout, critical).",
+        "Memory or CPU: find the request or task the worker was running in Odoo's log lines before each end.",
+        "Timeout: check lock waits (L1) and the database's load (M3).",
+        "Call the ERP team with the kinds, the times and the requests."
+      ]
+    },
+    "R1": {
+      "file": "R1-refresh-budget.kql",
+      "functions": [
+        "functions/pg_logs.kql"
+      ],
+      "envs": [
+        "dev"
+      ],
+      "enabled_in": [
+        "dev"
+      ],
+      "title": "View refresh over its budget",
+      "group": "ticket",
+      "severity": 3,
+      "frequency": "PT15M",
+      "window": "PT15M",
+      "lookback": "15m",
+      "params": {
+        "View": "\"lot_stock_view\"",
+        "BudgetSec": "300",
+        "BinSize": "15m"
+      },
+      "dimensions": [],
+      "about": "A refresh of the dev view lot_stock_view ran longer than 300 s, its 5-minute schedule: refreshes start to overlap and load the dev server (2026-09-09: up to 28 minutes).",
+      "first_steps": [
+        "Open in Azure: the refresh's duration.",
+        "Check the dev server's CPU and whether two refreshes overlap.",
+        "Next working day: to the ERP team (the schedule or the view's query)."
+      ]
+    },
+    "SLO-fast": {
+      "file": "SLO-burn-rate.kql",
+      "functions": [],
+      "title": "Error budget burning fast (2 % of 30 days' budget in 1 h)",
+      "group": "page",
+      "severity": 1,
+      "frequency": "PT5M",
+      "window": "PT2H",
+      "lookback": "75m",
+      "params": {
+        "Slo": "0.995",
+        "MinBad": "10",
+        "BinSize": "5m",
+        "TvPrefix": "\"/erp/tv/\"",
+        "Factor": "14.4",
+        "LongWindow": "1h",
+        "ShortWindow": "5m",
+        "ReportWindow": "10m"
+      },
+      "backtest_params": {
+        "ReportWindow": "1000d"
+      },
+      "dimensions": [
+        "Journey"
+      ],
+      "about": "This journey (tv or interactive) is spending its 30-day error budget over 14.4 times too fast, in the last hour and the last 5 minutes: at this pace 2 % of the month's budget goes in an hour. Users are failing now.",
+      "first_steps": [
+        "Look at the Journey and the burn on the row.",
+        "Find the failing paths and codes in the web app's nginx lines of the last hour (L2 shows the codes).",
+        "Check the web app for a deploy, kills or restarts in that hour.",
+        "Call the ERP team; if users are blocked, tell the business channel what fails and when the next update comes."
+      ]
+    },
+    "SLO-slow": {
+      "file": "SLO-burn-rate.kql",
+      "functions": [],
+      "title": "Error budget burning steadily (5 % of 30 days' budget in 6 h)",
+      "group": "ticket",
+      "severity": 3,
+      "frequency": "PT15M",
+      "window": "P1D",
+      "lookback": "375m",
+      "params": {
+        "Slo": "0.995",
+        "MinBad": "10",
+        "BinSize": "5m",
+        "TvPrefix": "\"/erp/tv/\"",
+        "Factor": "6",
+        "LongWindow": "6h",
+        "ShortWindow": "30m",
+        "ReportWindow": "20m"
+      },
+      "backtest_params": {
+        "ReportWindow": "1000d"
+      },
+      "dimensions": [
+        "Journey"
+      ],
+      "about": "This journey is spending its error budget 6 times too fast over 6 hours and the last 30 minutes: a slow leak of failures that never makes a burst.",
+      "first_steps": [
+        "Look at the Journey and the burn on the row.",
+        "Group the last 6 hours' 5xx by path: one endpoint usually dominates.",
+        "Check for a recent deploy or a failing scheduled task behind that path.",
+        "Next working day: the path and its error to the ERP team."
+      ]
+    }
+  }
+}

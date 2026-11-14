@@ -1,0 +1,31 @@
+{
+  "type": "AdaptiveCard",
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "version": "1.4",
+  "msteams": { "width": "Full" },
+  "body": [
+    {
+      "type": "TextBlock", "size": "Large", "weight": "Bolder", "wrap": true,
+      "color": "@{if(equals(triggerBody()?['data']?['essentials']?['monitorCondition'], 'Resolved'), 'Good', 'Attention')}",
+      "text": "@{triggerBody()?['data']?['essentials']?['monitorCondition']}: @{replace(triggerBody()?['data']?['essentials']?['alertRule'], decodeUriComponent('%22'), '')}"
+    },
+    { "type": "TextBlock", "wrap": true, "text": "@{replace(coalesce(triggerBody()?['data']?['essentials']?['description'], ''), decodeUriComponent('%22'), '')}" },
+    {
+      "type": "FactSet",
+      "facts": [
+        { "title": "Severity", "value": "@{triggerBody()?['data']?['essentials']?['severity']}" },
+        { "title": "Fired (UTC)", "value": "@{triggerBody()?['data']?['essentials']?['firedDateTime']}" },
+        { "title": "Resolved (UTC)", "value": "@{coalesce(triggerBody()?['data']?['essentials']?['resolvedDateTime'], 'n/a')}" },
+        { "title": "Value", "value": "@{coalesce(string(triggerBody()?['data']?['alertContext']?['condition']?['allOf']?[0]?['metricValue']), 'n/a')}" },
+        { "title": "Condition", "value": "@{triggerBody()?['data']?['alertContext']?['condition']?['allOf']?[0]?['operator']} @{triggerBody()?['data']?['alertContext']?['condition']?['allOf']?[0]?['threshold']}" },
+        { "title": "Dimensions", "value": "@{replace(coalesce(string(triggerBody()?['data']?['alertContext']?['condition']?['allOf']?[0]?['dimensions']), 'n/a'), decodeUriComponent('%22'), '')}" }
+      ]
+    }
+  ],
+  "actions": [
+    {
+      "type": "Action.OpenUrl", "title": "Open in Azure",
+      "url": "@{coalesce(triggerBody()?['data']?['alertContext']?['condition']?['allOf']?[0]?['linkToFilteredSearchResultsUI'], triggerBody()?['data']?['essentials']?['investigationLink'], 'https://portal.azure.com/#view/Microsoft_Azure_Monitoring/AzureMonitoringBrowseBlade/~/alertsV2')}"
+    }
+  ]
+}

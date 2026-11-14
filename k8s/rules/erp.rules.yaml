@@ -1,0 +1,92 @@
+# The track's rules translated to PromQL (docs/specs/kubernetes-mapping.md#the-rules): one group per signal of the
+# round 1 and 3 specs that has a Kubernetes source. Severities are the track's two: page and ticket.
+# Tested offline with promtool (k8s/rules/erp.rules.test.yaml); applied as a PrometheusRule by k8s/lab.sh.
+groups:
+  - name: erp-L1-lock-waits
+    rules:
+      - alert: L1LockWait
+        # Azure reads the wait from the log line written when it ends; Prometheus samples it while it lasts
+        expr: max(erp_lock_wait_max_seconds) > 60
+        labels: {severity: page, rule: L1}
+        annotations:
+          summary: "A lock wait in progress for {{ $value | humanizeDuration }}"
+          first_steps: "1. Find the holder: pg_blocking_pids() of the waiting pid. 2. Decide with the ERP team whether to end it."
+      - alert: L1LockBurst
+        expr: max_over_time(erp_lock_wait_waiting[15m]) >= 5
+        labels: {severity: ticket, rule: L1}
+        annotations:
+          summary: "{{ $value }} sessions waited for locks at once in 15 min"
+
+  - name: erp-L6-late-tasks
+    rules:
+      - alert: L6LateTask
+        # as round 1: an active task overdue by more than its own interval (and by at least 2 min)
+        expr: (erp_cron_overdue_seconds > erp_cron_interval_seconds) and erp_cron_overdue_seconds > 120
+        labels: {severity: ticket, rule: L6}
+        annotations:
+          summary: "Scheduled task {{ $labels.name }} {{ $value | humanizeDuration }} late"
+
+  - name: erp-L7-terminations
+    rules:
+      - alert: L7Killed
+        expr: >-
+          (increase(kube_pod_container_status_restarts_total{namespace="erp"}[15m]) > 0)
+          and on (namespace, pod, container)
+          (kube_pod_container_status_last_terminated_reason{namespace="erp", reason="OOMKilled"} == 1)
+        labels: {severity: page, rule: L7}
+        annotations:
+          summary: "{{ $labels.container }} in {{ $labels.pod }} killed for memory"
+      - alert: M1Restarts
+        expr: increase(kube_pod_container_status_restarts_total{namespace="erp"}[15m]) > 0
+        labels: {severity: ticket, rule: M1}
+        annotations:
+          summary: "{{ $labels.container }} in {{ $labels.pod }} restarted in the last 15 min"
+
+  - name: erp-H-and-M5
+    rules:
+      - alert: HExporterSilent
+        # the SQL job's heartbeat on Azure; here the exporter that reads Odoo's tables
+        expr: absent(up{job="postgres-exporter", namespace="erp"} == 1)
+        for: 2m
+        labels: {severity: page, rule: H}
+        annotations:
+          summary: "No scrape of Odoo's database for 2 min: L1 and L6 are blind"
+      - alert: M5DatabaseDown
+        expr: pg_up{namespace="erp"} == 0
+        for: 1m
+        labels: {severity: page, rule: M5}
+        annotations:
+          summary: "The exporter cannot reach the database"
+
+  - name: erp-SLO
+    rules:
+      # erp:requests:count5m and :count1h and their _bad twins are recorded by Loki's ruler from Odoo's access lines
+      # (k8s/rules/loki-rules.yaml) and written here; D22's target 99.5 %, so a burn rate of 14.4 is 7.2 % bad
+      - record: erp:slo_bad_ratio:5m
+        expr: sum by (journey) (erp:requests_bad:count5m) / sum by (journey) (erp:requests:count5m)
+      - record: erp:slo_bad_ratio:1h
+        expr: sum by (journey) (erp:requests_bad:count1h) / sum by (journey) (erp:requests:count1h)
+      - alert: SLOFast
+        expr: erp:slo_bad_ratio:1h > (14.4 * 0.005) and erp:slo_bad_ratio:5m > (14.4 * 0.005)
+        labels: {severity: page, rule: SLO-fast}
+        annotations:
+          summary: "Journey {{ $labels.journey }} burns its 30-day budget at over 14.4x"
+
+  - name: erp-round-2
+    rules:
+      - alert: Q1HeavyHour
+        # round 2's Q1: over 90 min of database time in an hour; pg_stat_statements' total as a counter, over a
+        # rolling hour (Azure reads Query Store's complete hours)
+        expr: increase(erp_db_time_seconds_total[1h]) / 60 > 90
+        labels: {severity: ticket, rule: Q1}
+        annotations:
+          summary: '{{ printf "%.0f" $value }} min of database time in the last hour'
+      - alert: T1TableBloat
+        # round 2's T1: a quarter or more of a table's rows dead, at least 100,000, no autovacuum for 24 h or never
+        expr: >-
+          (erp_table_dead_rows / clamp_min(erp_table_dead_rows + erp_table_live_rows, 1) >= 0.25)
+          and (erp_table_dead_rows >= 100000)
+          and ((time() - erp_table_last_autovacuum_seconds > 86400) or (erp_table_last_autovacuum_seconds == 0))
+        labels: {severity: ticket, rule: T1}
+        annotations:
+          summary: "Table {{ $labels.table }}: {{ $value | humanizePercentage }} of its rows dead, autovacuum behind"

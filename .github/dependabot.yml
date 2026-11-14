@@ -1,0 +1,13 @@
+# Dependabot (docs/specs/pipeline.md#dependencies): pull requests for the job's pinned Python packages and the
+# workflow's pinned action, weekly. The pipeline's own tools are pinned in tools/ci-tools.sh and bumped by hand.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /job
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

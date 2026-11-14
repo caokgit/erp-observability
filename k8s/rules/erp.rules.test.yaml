@@ -1,0 +1,185 @@
+# promtool test rules k8s/rules/erp.rules.test.yaml: each rule fires on the shape it was built for, and not below it.
+rule_files: [erp.rules.yaml]
+evaluation_interval: 15s
+tests:
+  - name: L1 pages on a wait past 60 s, while it lasts
+    interval: 15s
+    input_series:
+      - series: 'erp_lock_wait_max_seconds{namespace="erp", pod="exp"}'
+        values: '0 30 45 61 76 0'
+      - series: 'erp_lock_wait_waiting{namespace="erp", pod="exp"}'
+        values: '0 1 1 1 1 0'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: L1LockWait
+        exp_alerts: []
+      - eval_time: 45s
+        alertname: L1LockWait
+        exp_alerts:
+          - exp_labels: {severity: page, rule: L1}
+            exp_annotations:
+              summary: "A lock wait in progress for 1m 1s"
+              first_steps: "1. Find the holder: pg_blocking_pids() of the waiting pid. 2. Decide with the ERP team whether to end it."
+      - eval_time: 75s
+        alertname: L1LockWait
+        exp_alerts: []
+      - eval_time: 60s
+        alertname: L1LockBurst
+        exp_alerts: []
+
+  - name: L6 tickets a task late by more than its interval
+    interval: 15s
+    input_series:
+      - series: 'erp_cron_overdue_seconds{name="Incident lab: one-minute task"}'
+        values: '30 100 200'
+      - series: 'erp_cron_interval_seconds{name="Incident lab: one-minute task"}'
+        values: '60 60 60'
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: L6LateTask
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: L6LateTask
+        exp_alerts:
+          - exp_labels: {severity: ticket, rule: L6, name: "Incident lab: one-minute task"}
+            exp_annotations: {summary: "Scheduled task Incident lab: one-minute task 3m 20s late"}
+
+  - name: L7 pages a memory kill; M1 tickets the restart
+    interval: 15s
+    input_series:
+      - series: 'kube_pod_container_status_restarts_total{namespace="erp", pod="odoo-1", container="odoo"}'
+        values: '0 0 1 1'
+      - series: 'kube_pod_container_status_last_terminated_reason{namespace="erp", pod="odoo-1", container="odoo", reason="OOMKilled"}'
+        values: '0 0 1 1'
+    alert_rule_test:
+      - eval_time: 45s
+        alertname: L7Killed
+        exp_alerts:
+          - exp_labels: {severity: page, rule: L7, namespace: erp, pod: odoo-1, container: odoo}
+            exp_annotations: {summary: "odoo in odoo-1 killed for memory"}
+      - eval_time: 45s
+        alertname: M1Restarts
+        exp_alerts:
+          - exp_labels: {severity: ticket, rule: M1, namespace: erp, pod: odoo-1, container: odoo}
+            exp_annotations: {summary: "odoo in odoo-1 restarted in the last 15 min"}
+
+  - name: H pages when the exporter has been silent for 2 min
+    interval: 15s
+    input_series:
+      - series: 'up{job="postgres-exporter", namespace="erp"}'
+        values: '1 1 0 0 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: HExporterSilent
+        exp_alerts: []
+      - eval_time: 2m45s
+        alertname: HExporterSilent
+        exp_alerts:
+          - exp_labels: {severity: page, rule: H}
+            exp_annotations: {summary: "No scrape of Odoo's database for 2 min: L1 and L6 are blind"}
+
+  - name: SLO-fast pages one journey burning over 14.4x on both windows, not the other
+    interval: 30s
+    input_series:
+      - series: 'erp:requests:count5m{journey="interactive"}'
+        values: '60 60'
+      - series: 'erp:requests_bad:count5m{journey="interactive"}'
+        values: '40 40'
+      - series: 'erp:requests:count1h{journey="interactive"}'
+        values: '400 400'
+      - series: 'erp:requests_bad:count1h{journey="interactive"}'
+        values: '40 40'
+      - series: 'erp:requests:count5m{journey="tv"}'
+        values: '150 150'
+      - series: 'erp:requests_bad:count5m{journey="tv"}'
+        values: '1 1'
+      - series: 'erp:requests:count1h{journey="tv"}'
+        values: '1800 1800'
+      - series: 'erp:requests_bad:count1h{journey="tv"}'
+        values: '1 1'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: SLOFast
+        exp_alerts:
+          - exp_labels: {severity: page, rule: SLO-fast, journey: interactive}
+            exp_annotations: {summary: "Journey interactive burns its 30-day budget at over 14.4x"}
+
+  - name: L1-burst tickets 5 sessions waiting at once
+    interval: 15s
+    input_series:
+      - series: 'erp_lock_wait_waiting{namespace="erp", pod="exp"}'
+        values: '0 2 5 1'
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: L1LockBurst
+        exp_alerts: []
+      - eval_time: 45s
+        alertname: L1LockBurst
+        exp_alerts:
+          - exp_labels: {severity: ticket, rule: L1, namespace: erp, pod: exp}
+            exp_annotations: {summary: "5 sessions waited for locks at once in 15 min"}
+
+  - name: M5 pages when the database is down for a minute
+    interval: 15s
+    input_series:
+      - series: 'pg_up{namespace="erp", job="postgres-exporter"}'
+        values: '1 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: M5DatabaseDown
+        exp_alerts: []
+      - eval_time: 90s
+        alertname: M5DatabaseDown
+        exp_alerts:
+          - exp_labels: {severity: page, rule: M5, namespace: erp, job: postgres-exporter}
+            exp_annotations: {summary: "The exporter cannot reach the database"}
+
+  - name: Q1 tickets over 90 min of database time in an hour, not at 80
+    interval: 1m
+    input_series:
+      - series: 'erp_db_time_seconds_total{namespace="erp", pod="exp", instance="busy"}'
+        values: '0+100x61'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: Q1HeavyHour
+        exp_alerts:
+          - exp_labels: {severity: ticket, rule: Q1, namespace: erp, pod: exp, instance: busy}
+            exp_annotations: {summary: "100 min of database time in the last hour"}
+  - name: Q1 stays quiet at 80 min an hour
+    interval: 1m
+    input_series:
+      - series: 'erp_db_time_seconds_total{namespace="erp", pod="exp"}'
+        values: '0+80x61'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: Q1HeavyHour
+        exp_alerts: []
+
+  - name: T1 tickets a bloated table never autovacuumed, not a small or a vacuumed one
+    interval: 15s
+    input_series:
+      - series: 'erp_table_dead_rows{table="lab_bloat"}'
+        values: '120000 120000'
+      - series: 'erp_table_live_rows{table="lab_bloat"}'
+        values: '120000 120000'
+      - series: 'erp_table_last_autovacuum_seconds{table="lab_bloat"}'
+        values: '0 0'
+      - series: 'erp_table_dead_rows{table="small"}'
+        values: '5000 5000'
+      - series: 'erp_table_live_rows{table="small"}'
+        values: '5000 5000'
+      - series: 'erp_table_last_autovacuum_seconds{table="small"}'
+        values: '0 0'
+      - series: 'erp_table_dead_rows{table="vacuumed"}'
+        values: '200000 200000'
+      - series: 'erp_table_live_rows{table="vacuumed"}'
+        values: '200000 200000'
+      - series: 'erp_table_last_autovacuum_seconds{table="vacuumed"}'
+        values: '10 10'
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: T1TableBloat
+        exp_alerts:
+          - exp_labels: {severity: ticket, rule: T1, table: lab_bloat}
+            exp_annotations: {summary: "Table lab_bloat: 50% of its rows dead, autovacuum behind"}
+

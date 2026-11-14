@@ -1,0 +1,11 @@
+// L4 IKE errors (docs/specs/round-1.md#signals): quick-mode cleanups with an error code not in IgnoreCodes
+// ("IkeCleanupQMNegotiation called with error 13805 and flags 0"). What the codes mean is V1 in docs/design.md.
+// Parameters: Gateway, IgnoreCodes, MinErrors, Start, End, BinSize.
+AzureDiagnostics
+| where TimeGenerated between (Start .. End) and Category == "IKEDiagnosticLog" and Resource =~ Gateway
+| where Message has "IkeCleanupQMNegotiation called with error"
+| extend Code = toint(extract(@"called with error ([0-9]+)", 1, Message))
+| where Code !in (IgnoreCodes)
+| summarize Errors = count(), Codes = make_set(Code) by Bin = bin_at(TimeGenerated, BinSize, Start)
+| where Errors >= MinErrors
+| project Bin, Errors, Codes

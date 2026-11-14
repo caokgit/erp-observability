@@ -1,0 +1,12 @@
+// Q1 heavy hour (docs/specs/round-2.md#signals): an hour in which the Odoo database used more than MaxDbMin minutes of
+// database time, from Query Store's runtime rows; only complete hours that have had IngestLag to arrive. The row names
+// the three costliest query ids of that hour (their text stays on the server, in azure_sys).
+// Parameters: TargetDatabaseId, Start, End, MaxDbMin, IngestLag.
+PGSQLQueryStoreRuntime
+| where TimeGenerated between (Start .. End) and DatabaseId == TargetDatabaseId and IsSystemQuery == false
+| summarize QueryMin = sum(TotalExecDurationMs) / 60000.0 by Bin = bin(StartTime, 1h), QueryId
+| where Bin >= bin(Start, 1h) and Bin + 1h <= End - IngestLag
+| order by Bin asc, QueryMin desc
+| summarize DbMin = round(sum(QueryMin), 1), Top3 = make_list(strcat(QueryId, ": ", round(QueryMin, 1), " min"), 3) by Bin
+| where DbMin > MaxDbMin
+| project Bin, DbMin, Top3

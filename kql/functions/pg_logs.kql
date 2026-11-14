@@ -1,0 +1,12 @@
+// PgLogs(servers): the Postgres server log of the servers named, in one shape, whichever table their diagnostic
+// setting writes to: the prd server writes PGSQLServerLogs (resource-specific), the dev server AzureDiagnostics
+// (category PostgreSQLLogs). Reads Start and End from the parameters prepended to every rule.
+let PgLogs = (servers: dynamic) {
+    union isfuzzy=true
+        (PGSQLServerLogs
+         | where TimeGenerated between (Start .. End) and LogicalServerName in~ (servers)
+         | project TimeGenerated, Server = LogicalServerName, Message),
+        (AzureDiagnostics
+         | where TimeGenerated between (Start .. End) and Category == "PostgreSQLLogs" and LogicalServerName_s in~ (servers)
+         | project TimeGenerated, Server = LogicalServerName_s, Message)
+};
